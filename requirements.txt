@@ -1,0 +1,20 @@
+# Neft Emalı Optimallaşdırma Sistemi — Asılılıqlar (DÜZƏLDİLMİŞ)
+# Quraşdırma: pip install -r requirements.txt
+
+# ── Dashboard və vizualizasiya ──
+streamlit>=1.35.0
+plotly>=5.20.0
+
+# ── Məlumat emalı ──
+pandas>=2.1.0
+numpy>=1.26.0
+scikit-learn>=1.4.0
+
+# ── Optimallaşdırma alqoritmi ──
+pymoo>=0.6.1
+
+# ── AI Köməkçi (ChatBot) — OpenAI + ElevenLabs TTS ──
+openai>=1.0.0          # Chat completions + TTS fallback (tts-1-hd)
+elevenlabs>=1.0.0      # Əsas TTS: eleven_multilingual_v2, Azərbaycan dili dəstəyi
+python-dotenv>=1.0.0
+

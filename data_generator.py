@@ -64,41 +64,51 @@ def _compute_yields(
     P  = df["column_pressure"]
     F  = df["flow_rate"]
     R  = df["reflux_ratio"]
+    Tf = df["feed_temp"]
+    H2 = df["h2_pressure"]
+    Tc = df["catalyst_temp"]
     Tc = df["catalyst_temp"]
     H2 = df["h2_pressure"]
     d  = df["crude_density"]
     S  = df["sulfur_content"]
 
     Y_benz = (
-        0.18 * ((T - 340) / 60)
-        + 0.04 * ((0.920 - d) / 0.1)
+        0.11 * ((T - 340) / 60)
+        + 0.06 * ((F - 80) / 80)
+        + 0.02 * ((0.920 - d) / 0.1)
         + 0.12
         + rng.normal(0, 0.005, len(df))
     ).clip(0.10, 0.32)
 
     Y_dizel = (
-        0.22 * ((R - 2.5) / 2.5)
-        + 0.03 * ((P - 1.2) / 0.3)
-        + 0.18
+        0.155 * ((R - 2.5) / 2.5)
+        + 0.02 * ((P - 1.2) / 0.3)
+        + 0.20
         + rng.normal(0, 0.005, len(df))
     ).clip(0.15, 0.38)
 
     Y_ker = (
-        0.15 * ((T - 340) / 60) * ((P - 1.2) / 0.3)
+        0.12 * ((T - 340) / 60) * ((P - 1.2) / 0.3)
+        + 0.04 * ((Tf - 100) / 50)
         + 0.10
         + rng.normal(0, 0.004, len(df))
-    ).clip(0.08, 0.22)
+    ).clip(0.08, 0.26)
 
     E = (
         0.042 * T
         + 0.018 * F
-        - 10.5
+        + 0.008 * Tf
+        + 0.800 * R
+        + 0.060 * H2
+        + 0.020 * Tc
+        + 0.500 * (d - 0.820)
+        - 20.92
         + rng.normal(0, 0.3, len(df))
     ).clip(5.0, 22.0)
 
     S_removal = (
-        0.55 * ((H2 - 30) / 30)
-        + 0.30 * ((Tc - 280) / 80)
+        0.35 * ((H2 - 30) / 30)
+        + 0.20 * ((Tc - 280) / 80)
         + 0.40
         + rng.normal(0, 0.02, len(df))
     ).clip(0.30, 0.98)

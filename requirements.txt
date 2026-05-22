@@ -1,4 +1,4 @@
-# Neft Emalı Optimallaşdırma Sistemi — Asılılıqlar (DÜZƏLDİLMİŞ)
+# Neft Emalı Optimallaşdırma Sistemi — Asılılıqlar
 # Quraşdırma: pip install -r requirements.txt
 
 # ── Dashboard və vizualizasiya ──
@@ -13,8 +13,6 @@ scikit-learn>=1.4.0
 # ── Optimallaşdırma alqoritmi ──
 pymoo>=0.6.1
 
-# ── AI Köməkçi (ChatBot) — OpenAI + ElevenLabs TTS ──
-openai>=1.0.0          # Chat completions + TTS fallback (tts-1-hd)
-elevenlabs>=1.0.0      # Əsas TTS: eleven_multilingual_v2, Azərbaycan dili dəstəyi
+# ── AI Köməkçi (ChatBot) — OpenAI TTS ──
+openai>=1.0.0
 python-dotenv>=1.0.0
-

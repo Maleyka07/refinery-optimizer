@@ -2,27 +2,19 @@
 Neft Emalı Optimallaşdırma Sistemi
 Modul: preprocessor.py
 Məqsəd: Sensor məlumatının filtrasiyası, normallaşdırılması,
-        anomaliya aşkarlanması və reqressiya modelləşdirilməsi.
+        anomaliya aşkarlanması və xətti reqressiya modelləşdirilməsi.
 
 Reqressiya arxitekturası:
-    Hər hədəf dəyişəni üçün iki model paralel öyrədilir:
-        1. GradientBoostingRegressor  — addım-addım boosting, aşağı bias
-        2. RandomForestRegressor      — bagging topluluğu, aşağı dispersiya
-    Çəkilər 5-qatlı cross-validation R² skorlarından avtomatik hesablanır:
-        w_gb = cv_r2_gb / (cv_r2_gb + cv_r2_rf)
-        w_rf = 1 - w_gb
-    Yekun proqnoz: ensemble_pred = w_gb * gb_pred + w_rf * rf_pred
-    Hər model üçün CV R², train R² və RMSE metrikaları ayrıca saxlanılır.
+    Hər hədəf dəyişəni üçün LinearRegression öyrədilir.
+    Model: Y = a1*T + a2*P + a3*F + ... + a9*S + b
+    Metrikalar: R², RMSE, əmsallar (feature coefficients)
 """
 
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.ensemble import (
-    GradientBoostingRegressor,
-    RandomForestRegressor,
-    IsolationForest,
-)
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import IsolationForest
 from sklearn.metrics import r2_score, mean_squared_error
 from sklearn.model_selection import cross_val_score
 import warnings
@@ -39,35 +31,8 @@ TARGET_COLS = [
     "energy_gj_h", "sulfur_removal", "total_yield",
 ]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Model hiperparametrlər — hər iki alqoritm üçün sabit, izlənə bilən
-# ─────────────────────────────────────────────────────────────────────────────
+CV_FOLDS = 3
 
-GB_PARAMS = {
-    "n_estimators":    80,         # 200→80: sürət ~2.5x, R² fərqi < 0.01
-    "max_depth":       4,
-    "learning_rate":   0.08,
-    "subsample":       0.85,
-    "min_samples_leaf": 5,
-    "random_state":    42,
-}
-
-RF_PARAMS = {
-    "n_estimators":    80,         # 200→80: sürət ~2.5x, R² fərqi < 0.01
-    "max_depth":       12,         # None→12: ağaclar artıq tam böyüməyəcək, 2x sürətli
-    "min_samples_leaf": 4,
-    "max_features":    "sqrt",
-    "random_state":    42,
-    "n_jobs":          -1,
-}
-
-# Cross-validation parametri
-CV_FOLDS = 3                       # 5→3: keyfiyyət itirmədən fold sayı azaldı
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Filtrasiya
-# ─────────────────────────────────────────────────────────────────────────────
 
 def filter_data(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -84,10 +49,6 @@ def filter_data(df: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(subset=INPUT_FEATURES).reset_index(drop=True)
     return df
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Normallaşdırma
-# ─────────────────────────────────────────────────────────────────────────────
 
 class DataNormaliser:
     """Min-Maks normallaşdırma — X və y üçün ayrı scaler."""
@@ -119,10 +80,6 @@ class DataNormaliser:
         return self.scaler_y.inverse_transform(y_norm)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Anomaliya aşkarlanması
-# ─────────────────────────────────────────────────────────────────────────────
-
 def detect_anomalies(df: pd.DataFrame) -> pd.DataFrame:
     """
     İki paralel metod:
@@ -148,153 +105,82 @@ def detect_anomalies(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Reqressiya modeli — GradientBoosting + RandomForest ensemble
-# ─────────────────────────────────────────────────────────────────────────────
-
-class RegressionModel:
+class LinearRegressionModel:
     """
-    Hər hədəf dəyişəni üçün iki model öyrədilir:
-        gb[target]  — GradientBoostingRegressor
-        rf[target]  — RandomForestRegressor
-
-    Çəkilər CV_FOLDS-qatlı cross-validation R² skoruna əsasən hesablanır:
-        w_gb[target] = cv_gb / (cv_gb + cv_rf)
-        w_rf[target] = 1 - w_gb[target]
-
-    Proqnoz: ensemble_pred = w_gb * gb_pred + w_rf * rf_pred
+    Hər hədəf dəyişəni üçün ayrı LinearRegression öyrədilir.
+    Y = a1*x1 + a2*x2 + ... + a9*x9 + b
 
     metrics cədvəlinin sütunları:
-        GB_CV_R², RF_CV_R², GB_R², RF_R², Ensemble_R², Ensemble_RMSE,
-        W_GB, W_RF
+        CV_R², R², RMSE
+    Coefficients: hər feature üçün əmsal (intercept daxil)
     """
 
     def __init__(self):
-        self.gb      : dict[str, GradientBoostingRegressor] = {}
-        self.rf      : dict[str, RandomForestRegressor]     = {}
-        self.weights : dict[str, tuple[float, float]]       = {}  # (w_gb, w_rf)
-        self.metrics : dict[str, dict]                      = {}
+        self.models  : dict[str, LinearRegression] = {}
+        self.metrics : dict[str, dict]             = {}
+        self.coeffs  : dict[str, np.ndarray]       = {}
         self._fitted = False
 
-    # ------------------------------------------------------------------
-    def fit(self, X: pd.DataFrame, y: pd.DataFrame) -> "RegressionModel":
-        # DataFrame saxla — feature name warning-lərinin qarşısını alır
-        X_df = X[INPUT_FEATURES]
-        X_arr = X_df.values  # CV üçün array lazımdır (cross_val_score)
+    def fit(self, X: pd.DataFrame, y: pd.DataFrame) -> "LinearRegressionModel":
+        X_df  = X[INPUT_FEATURES]
+        X_arr = X_df.values
 
         for target in TARGET_COLS:
             y_t = y[target].values
 
-            # ── Model qurulması ────────────────────────────────────────
-            gb_model = GradientBoostingRegressor(**GB_PARAMS)
-            rf_model = RandomForestRegressor(**RF_PARAMS)
+            model = LinearRegression()
 
-            # ── Cross-validation R² skorları (fit edilməmiş modellər üzərində)
-            # n_jobs=1: Windows-da Streamlit @st.cache_resource içindən joblib
-            # multiprocessing pool yarada bilmir → BrokenProcessPool xətası.
-            # n_jobs=1 ilə eyni nəticə, tək prosesdə ardıcıl icra.
-            cv_gb = cross_val_score(
-                gb_model, X_arr, y_t,
-                cv=CV_FOLDS, scoring="r2", n_jobs=1,
-            ).mean()
-            cv_rf = cross_val_score(
-                rf_model, X_arr, y_t,
+            cv_r2 = cross_val_score(
+                model, X_arr, y_t,
                 cv=CV_FOLDS, scoring="r2", n_jobs=1,
             ).mean()
 
-            # ── CV R² mənfi ola bilər (çox zəif model); sıfırla məhdudlaşdır
-            cv_gb_clip = max(cv_gb, 0.0)
-            cv_rf_clip = max(cv_rf, 0.0)
-            denom      = cv_gb_clip + cv_rf_clip
+            model.fit(X_df, y_t)
+            pred = model.predict(X_df)
 
-            if denom < 1e-9:
-                # İki model da tamamilə zəifdirsə bərabər çəki ver
-                w_gb, w_rf = 0.5, 0.5
-            else:
-                w_gb = cv_gb_clip / denom
-                w_rf = cv_rf_clip / denom
-
-            # ── Tam məlumat üzərində son fit — DataFrame ilə, array yox
-            # (predict zamanı "feature names" warning-ini aradan qaldırır)
-            gb_model.fit(X_df, y_t)
-            rf_model.fit(X_df, y_t)
-
-            gb_pred  = gb_model.predict(X_df)
-            rf_pred  = rf_model.predict(X_df)
-            ens_pred = w_gb * gb_pred + w_rf * rf_pred
-
-            self.gb[target]      = gb_model
-            self.rf[target]      = rf_model
-            self.weights[target] = (round(w_gb, 4), round(w_rf, 4))
+            self.models[target]  = model
+            self.coeffs[target]  = np.append(model.coef_, model.intercept_)
 
             self.metrics[target] = {
-                "GB_CV_R²":      round(cv_gb,  4),
-                "RF_CV_R²":      round(cv_rf,  4),
-                "W_GB":          round(w_gb,   4),
-                "W_RF":          round(w_rf,   4),
-                "GB_R²":         round(r2_score(y_t, gb_pred),  4),
-                "RF_R²":         round(r2_score(y_t, rf_pred),  4),
-                "Ensemble_R²":   round(r2_score(y_t, ens_pred), 4),
-                "Ensemble_RMSE": round(np.sqrt(mean_squared_error(y_t, ens_pred)), 6),
+                "CV_R²": round(cv_r2, 4),
+                "R²":    round(r2_score(y_t, pred), 4),
+                "RMSE":  round(np.sqrt(mean_squared_error(y_t, pred)), 6),
             }
 
         self._fitted = True
         return self
 
-    # ------------------------------------------------------------------
     def predict(self, X: pd.DataFrame) -> pd.DataFrame:
-        """CV çəkilərinə əsasən ensemble proqnozu qaytarır."""
         assert self._fitted, "Əvvəlcə fit çağırın."
-        # DataFrame ilə predict — feature names warning-i baş vermir
-        X_df = X[INPUT_FEATURES]
-        preds = {}
-        for target in TARGET_COLS:
-            w_gb, w_rf    = self.weights[target]
-            gb_pred       = self.gb[target].predict(X_df)
-            rf_pred       = self.rf[target].predict(X_df)
-            preds[target] = w_gb * gb_pred + w_rf * rf_pred
+        X_df  = X[INPUT_FEATURES]
+        preds = {t: self.models[t].predict(X_df) for t in TARGET_COLS}
         return pd.DataFrame(preds, index=X.index)
 
-    # ------------------------------------------------------------------
     def get_metrics_df(self) -> pd.DataFrame:
-        """
-        Sütunlar: GB_CV_R², RF_CV_R², W_GB, W_RF,
-                  GB_R², RF_R², Ensemble_R², Ensemble_RMSE
-        İndeks  : TARGET_COLS
-        """
+        """Sütunlar: CV_R², R², RMSE | İndeks: TARGET_COLS"""
         return pd.DataFrame(self.metrics).T
 
-    # ------------------------------------------------------------------
-    def feature_importances(self) -> pd.DataFrame:
-        """GB və RF feature importance-larını qaytarır."""
-        assert self._fitted, "Əvvəlcə fit çağırın."
-        rows = []
+    def get_coefficients_df(self) -> pd.DataFrame:
+        """
+        Hər hədəf üçün normallaşdırılmış feature əmsalları.
+        Sütunlar: INPUT_FEATURES + ['intercept'] | İndeks: TARGET_COLS
+        """
+        rows = {}
+        col_names = INPUT_FEATURES + ["intercept"]
         for target in TARGET_COLS:
-            gb_imp = self.gb[target].feature_importances_
-            rf_imp = self.rf[target].feature_importances_
-            row    = {"target": target}
-            for feat, gi, ri in zip(INPUT_FEATURES, gb_imp, rf_imp):
-                row[f"GB_{feat}"] = round(float(gi), 6)
-                row[f"RF_{feat}"] = round(float(ri), 6)
-            rows.append(row)
-        return pd.DataFrame(rows).set_index("target")
+            rows[target] = dict(zip(col_names, self.coeffs[target]))
+        return pd.DataFrame(rows).T
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ARO Pipeline
-# ─────────────────────────────────────────────────────────────────────────────
 
 class AROPipeline:
     """
     Tam pipeline:
-        filter_data → DataNormaliser → RegressionModel (GB + RF ensemble)
-
-    predict_physical() normallaşdırılmış proqnozu fiziki vahidlərə qaytarır.
+        filter_data → DataNormaliser → LinearRegressionModel
     """
 
     def __init__(self):
         self.normaliser = DataNormaliser()
-        self.regressor  = RegressionModel()
+        self.regressor  = LinearRegressionModel()
         self._ready     = False
 
     def fit(self, raw_df: pd.DataFrame) -> "AROPipeline":
@@ -318,20 +204,18 @@ class AROPipeline:
         return self.regressor.get_metrics_df()
 
     @property
-    def feature_importances(self) -> pd.DataFrame:
-        return self.regressor.feature_importances()
+    def coefficients(self) -> pd.DataFrame:
+        return self.regressor.get_coefficients_df()
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Tam pipeline funksiyası
-# ─────────────────────────────────────────────────────────────────────────────
 
 def run_preprocessing_pipeline(raw_df: pd.DataFrame) -> dict:
     """
     Qaytarır:
         raw_df, clean_df, anomaly_df,
         X_norm, y_norm, normaliser,
-        aro_pipeline, regression_metrics, feature_importances
+        aro_pipeline, regression_metrics,
+        regression_coeffs (feature coefficients DataFrame),
+        feature_importances (coefficients kimi — uyğunluq üçün)
     """
     clean_df   = filter_data(raw_df)
     anomaly_df = detect_anomalies(clean_df)
@@ -339,19 +223,25 @@ def run_preprocessing_pipeline(raw_df: pd.DataFrame) -> dict:
     aro = AROPipeline()
     aro.fit(clean_df)
 
-    # Normallaşdırılmış cədvəlləri ayrıca saxla (test + dashboard üçün)
     X_norm, y_norm = aro.normaliser.fit_transform(clean_df)
 
-    # regression_coeffs — app.py uyğunluğu üçün feature importances DataFrame
-    # Sütunlar: hər sensor üçün GB və RF importance-ları (əmsallar kimi istifadə olunur)
-    feat_imp = aro.feature_importances
-    # app.py "intercept" sütununu gözləyir (istilik xəritəsi üçün), əlavə edirik
-    regression_coeffs = feat_imp.copy()
-    # GB importance-larını əsas "əmsal" kimi istifadə üçün yenidən adlandırma
-    gb_cols = {c: c.replace("GB_", "") for c in feat_imp.columns if c.startswith("GB_")}
-    regression_coeffs_simple = feat_imp[[c for c in feat_imp.columns if c.startswith("GB_")]].copy()
-    regression_coeffs_simple.columns = [c.replace("GB_", "") for c in regression_coeffs_simple.columns]
-    regression_coeffs_simple["intercept"] = 0.0  # app.py intercept sütununu çıxarır
+    coeffs_df = aro.coefficients
+    # intercept sütununu çıxar, yalnız feature əmsalları
+    feature_cols = [c for c in coeffs_df.columns if c != "intercept"]
+    regression_coeffs_simple = coeffs_df[feature_cols].copy()
+    regression_coeffs_simple["intercept"] = coeffs_df["intercept"]
+
+    # feature_importances — əmsalların mütləq dəyərlərindən — GB_ prefiksi ilə
+    # app.py-da köhnə GB_ prefiksi gözlənilir, uyğunluq üçün saxlayırıq
+    fi_rows = []
+    for target in TARGET_COLS:
+        row = {"target": target}
+        for feat in INPUT_FEATURES:
+            val = abs(float(coeffs_df.loc[target, feat]))
+            row[f"GB_{feat}"] = round(val, 6)
+            row[f"RF_{feat}"] = round(val, 6)  # LR üçün eynidir
+        fi_rows.append(row)
+    feature_importances_df = pd.DataFrame(fi_rows).set_index("target")
 
     return {
         "raw_df":              raw_df,
@@ -362,15 +252,12 @@ def run_preprocessing_pipeline(raw_df: pd.DataFrame) -> dict:
         "normaliser":          aro.normaliser,
         "aro_pipeline":        aro,
         "regression_metrics":  aro.metrics,
-        "feature_importances": aro.feature_importances,
-        # App.py uyğunluğu: köhnə "regression_coeffs" açarı feature importances ilə doldurulur
         "regression_coeffs":   regression_coeffs_simple,
+        "feature_importances": feature_importances_df,
+        # Linear regression əmsalları tam DataFrame
+        "lr_coefficients":     coeffs_df,
     }
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CLI sınaq
-# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     from data_generator import generate_sensor_data
@@ -378,11 +265,10 @@ if __name__ == "__main__":
     raw = generate_sensor_data(n_samples=1440)
     out = run_preprocessing_pipeline(raw)
 
-    print("=== Reqressiya Metrikaları (GB + RF Ensemble) ===")
+    print("=== Linear Regression Metrikaları ===")
     print(out["regression_metrics"].to_string())
 
     print(f"\nAnomaly sayı: {out['anomaly_df']['anomaly_final'].sum()}")
 
-    print("\n=== Feature Importances (GradientBoosting) ===")
-    gb_cols = [c for c in out["feature_importances"].columns if c.startswith("GB_")]
-    print(out["feature_importances"][gb_cols].to_string())
+    print("\n=== Feature Əmsalları (normallaşdırılmış) ===")
+    print(out["regression_coeffs"].to_string())
